@@ -147,8 +147,8 @@ class LocationAnalyzer:
         # Search for all nearby venues without category restriction
         params = {
             "ll": f"{lat},{lon}",
-            "radius": 100,  # 100m radius for precise location matching
-            "limit": 10,  # Get top 10 venues
+            "radius": 75,  # 100m radius for precise location matching
+            "limit": 5,  # Get top 5 venues
             "sort": "DISTANCE",
             "fields": "name,categories,distance,location,fsq_id,geocodes,tel,website,hours,rating,stats,price,photos"
         }
@@ -174,7 +174,25 @@ class LocationAnalyzer:
                 if data.get('results'):
                     # Get all venues
                     venues = data['results']
-                    # Get the closest venue as primary
+                    # Check for residential buildings
+                    for venue in venues:
+                        if 'residential' in venue.get('categories', [{}])[0].get('name', '').lower():
+                            return {
+                                'name': venue.get('name', 'Residential Building'),
+                                'category': 'Residential Building',
+                                'distance': venue.get('distance', 0),
+                                'address': venue.get('location', {}).get('formatted_address', 'Unknown'),
+                                'fsq_id': venue.get('fsq_id', 'Unknown'),
+                                'tel': venue.get('tel', 'Unknown'),
+                                'website': venue.get('website', 'Unknown'),
+                                'rating': venue.get('rating', 'Unknown'),
+                                'hours': venue.get('hours', {}),
+                                'stats': venue.get('stats', {}),
+                                'price': venue.get('price', 'Unknown'),
+                                'photos': venue.get('photos', []),
+                                'all_venues': venues  # Include all nearby venues
+                            }
+                    # Get the closest venue as primary if no residential found
                     primary_venue = venues[0]
                     return {
                         'name': primary_venue.get('name', 'Unknown'),
@@ -218,8 +236,12 @@ class LocationAnalyzer:
         """Analyze venue patterns to identify common locations."""
         venue_categories = {}
         venue_names = {}
+        location_visits = []
         
         for loc in significant_locations:
+            if loc.get('is_noise', False):  # Skip noise points
+                continue
+                
             venue_info = self.get_venue_info(loc['latitude'], loc['longitude'], test_mode=False)
             if venue_info:
                 # Count categories
@@ -229,6 +251,21 @@ class LocationAnalyzer:
                 # Count venue names
                 name = venue_info['name']
                 venue_names[name] = venue_names.get(name, 0) + 1
+                
+                # Add location visit with distance and duration
+                location_visits.append({
+                    'name': name,
+                    'category': category,
+                    'distance': venue_info['distance'],
+                    'duration': loc['duration'],
+                    'stationary_time': loc['stationary_time'],
+                    'num_points': len(loc['points']),
+                    'address': venue_info['address'],
+                    'coordinates': (loc['latitude'], loc['longitude'])
+                })
+        
+        # Sort locations by distance
+        location_visits.sort(key=lambda x: x['distance'])
         
         # Sort by frequency
         sorted_categories = sorted(venue_categories.items(), key=lambda x: x[1], reverse=True)
@@ -242,10 +279,20 @@ class LocationAnalyzer:
         print("\nMost common venues:")
         for name, count in sorted_names[:5]:
             print(f"{name}: {count} visits")
+            
+        print("\nLocations sorted by distance:")
+        for visit in location_visits:
+            print(f"\n{visit['name']} ({visit['category']})")
+            print(f"Distance: {visit['distance']} meters")
+            print(f"Duration: {visit['duration']:.1f} hours")
+            print(f"Stationary time: {visit['stationary_time']:.1f} hours")
+            print(f"Number of points: {visit['num_points']}")
+            print(f"Address: {visit['address']}")
+            print(f"Coordinates: ({visit['coordinates'][0]:.6f}, {visit['coordinates'][1]:.6f})")
         
-        return sorted_categories, sorted_names
+        return sorted_categories, sorted_names, location_visits
     
-    def visualize_locations(self, df, significant_locations, output_file='locations_map.html', test_mode=True):
+    def visualize_locations(self, df, significant_locations, output_file='locations_map.html', test_mode=False):
         """Create an interactive map visualization."""
         # Create base map centered on the mean location
         center_lat = df['latitude'].mean()
@@ -310,13 +357,13 @@ class LocationAnalyzer:
             folium.CircleMarker(
                 location=[loc['latitude'], loc['longitude']],
                 radius=8,
-                color=color,
+                color='gray' if loc.get('is_noise', False) else color,
                 fill=True,
                 fill_opacity=1.0,
                 popup=folium.Popup(popup_text, max_width=400),
-                tooltip=f"Location {cluster_id} Center",
+                tooltip=f"Location {cluster_id} Center" if not loc.get('is_noise', False) else "Noise Point",
                 z_index_offset=1000  # Ensure center markers are always on top
-            ).add_to(cluster_groups[cluster_id])
+            ).add_to(noise_group if loc.get('is_noise', False) else cluster_groups[cluster_id])
             
             # Add all points in the cluster
             points = loc['points']
@@ -324,13 +371,13 @@ class LocationAnalyzer:
                 folium.CircleMarker(
                     location=[point['latitude'], point['longitude']],
                     radius=3,
-                    color=color,
+                    color='gray' if loc.get('is_noise', False) else color,
                     fill=True,
                     fill_opacity=0.5,
                     popup=f"Time: {point['time']}<br>State: {point['travelstate']}<br>Speed: {point['speed']:.1f} m/s",
-                    tooltip=f"Location {cluster_id} Point",
+                    tooltip=f"Location {cluster_id} Point" if not loc.get('is_noise', False) else "Noise Point",
                     z_index_offset=0  # Keep points below center markers
-                ).add_to(cluster_groups[cluster_id])
+                ).add_to(noise_group if loc.get('is_noise', False) else cluster_groups[cluster_id])
         
         # Add layer control
         folium.LayerControl().add_to(m)
@@ -434,8 +481,8 @@ def main():
     # Initialize analyzer
     analyzer = LocationAnalyzer()
     
-    # Load GPS data for user 0 (sample of 100 points)
-    df = analyzer.load_gps_data('dataset/sensing/gps/gps_u51.csv')
+    # Load GPS data for user 0 (all points)
+    df = analyzer.load_gps_data('dataset/sensing/gps/gps_u00.csv', sample_size=None)
     
     # Identify significant locations with adjusted parameters
     # eps = 0.00000785 is approximately 50 meters at this latitude
@@ -443,7 +490,7 @@ def main():
     significant_locations = analyzer.identify_significant_locations(df, eps=0.00000785, min_samples=3)
     
     # Analyze venue patterns
-    analyzer.analyze_venue_patterns(significant_locations)
+    sorted_categories, sorted_names, location_visits = analyzer.analyze_venue_patterns(significant_locations)
     
     # Create visualizations
     analyzer.visualize_locations(df, significant_locations, test_mode=False)
@@ -452,19 +499,28 @@ def main():
     analyzer.plot_location_heatmap(df)
     analyzer.plot_travel_patterns(df)
     
-    # Print summary
-    print(f"\nFound {len(significant_locations)} significant locations:")
-    for loc in significant_locations:
-        venue_info = analyzer.get_venue_info(loc['latitude'], loc['longitude'], test_mode=False)
-        print(f"\nLocation {loc['cluster_id']}:")
-        print(f"Coordinates: ({loc['latitude']:.6f}, {loc['longitude']:.6f})")
-        print(f"Duration: {loc['duration']:.1f} hours")
-        print(f"Stationary time: {loc['stationary_time']:.1f} hours")
-        if venue_info:
-            print(f"Venue: {venue_info['name']}")
-            print(f"Category: {venue_info['category']}")
-            print(f"Address: {venue_info['address']}")
-            print(f"Distance: {venue_info['distance']} meters")
+    # Print summary of most commonly visited locations
+    print("\nMost Commonly Visited Locations (by duration):")
+    # Sort locations by duration
+    location_visits.sort(key=lambda x: x['duration'], reverse=True)
+    for visit in location_visits[:5]:  # Show top 5 locations
+        print(f"\n{visit['name']} ({visit['category']})")
+        print(f"Total duration: {visit['duration']:.1f} hours")
+        print(f"Stationary time: {visit['stationary_time']:.1f} hours")
+        print(f"Number of visits: {visit['num_points']}")
+        print(f"Distance: {visit['distance']} meters")
+        print(f"Address: {visit['address']}")
+        print(f"Coordinates: ({visit['coordinates'][0]:.6f}, {visit['coordinates'][1]:.6f})")
+    
+    # Print summary of most common categories
+    print("\nMost Common Location Categories:")
+    for category, count in sorted_categories[:5]:
+        print(f"{category}: {count} locations")
+    
+    # Print summary of most common venues
+    print("\nMost Common Venues:")
+    for name, count in sorted_names[:5]:
+        print(f"{name}: {count} visits")
 
 if __name__ == "__main__":
     main() 
