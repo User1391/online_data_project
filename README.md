@@ -14,19 +14,13 @@ This project analyzes GPS data from the StudentLife dataset to identify signific
 ## Requirements
 
 - Python 3.8+
-- Dependencies listed in `requirements.txt`
-- Foursquare API key (stored in `.env` file)
 
 ## Installation
 
 1. Clone this repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
+2. Create a `.env` file with your Foursquare API key:
    ```
-3. Create a `.env` file with your Foursquare API key:
-   ```
-   FOURSQUARE_API_KEY=your_api_key_here
+   FOURSQUARE_API=your_api_key_here
    ```
 
 ## Usage
